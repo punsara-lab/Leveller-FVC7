@@ -1,0 +1,34 @@
+import type { ArcState } from './arcStore';
+import { completion } from './arcStore';
+
+export async function exportArcExcel(state: ArcState) {
+  const [{default:ExcelJS},{default:JSZip}] = await Promise.all([import('exceljs'),import('jszip')]);
+  const book = new ExcelJS.Workbook(); book.creator = 'FVC7'; book.created = new Date();
+  const summary = book.addWorksheet('Progress');
+  summary.addRow(['Date','Habits completed','Habits scheduled','Completion','Training (min)','Weight (kg)']);
+  const dates = Object.keys(state.logs).sort();
+  dates.forEach((date,i)=>{const log=state.logs[date], c=completion(state,date), row=i+2; summary.addRow([date,c.done,c.total,{formula:`IF(C${row}=0,0,B${row}/C${row})`,result:c.total?c.done/c.total:0},log.training,log.weight??null]);});
+  summary.getColumn(4).numFmt='0.0%'; summary.getColumn(6).numFmt='0.0';
+  const habits=book.addWorksheet('Habit history'); habits.addRow(['Date','Habit','Target','Completed']);
+  dates.forEach(date=>state.habits.filter(h=>h.created<=date&&(!h.archived||date<h.archived)).forEach(h=>habits.addRow([date,h.name,h.target,state.logs[date].habits.includes(h.id)?1:0])));
+  const config=book.addWorksheet('Arc'); config.addRows([['Field','Value'],['Arc name',state.name],['Start',state.start],['Deadline',state.end],['Data source','User-entered FVC7 ARC logs'],['Exported',new Date().toISOString()]]);
+  const schedule=book.addWorksheet('Weekly plan'); schedule.addRow(['Day','Session','Exercise','Target']); state.week.forEach(d=>d.it.forEach(([n,target])=>schedule.addRow([d.d,d.t,n,target])));
+  book.eachSheet(sheet=>{sheet.views=[{state:'frozen',ySplit:1}];sheet.autoFilter={from:'A1',to:{row:Math.max(1,sheet.rowCount),column:sheet.columnCount}};sheet.columns.forEach(c=>{c.width=24;}); sheet.eachRow((row,i)=>{row.font={name:'Arial',size:11};row.height=22;if(i===1){row.font={name:'Arial',size:11,bold:true,color:{argb:'FFFFFFFF'}};row.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF17212B'}};} else if(i%2===0){row.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF0F5F8'}};}});});
+  const buffer=await book.xlsx.writeBuffer(); const zip=await JSZip.loadAsync(buffer);
+  if(dates.length) {
+    const ns='http://schemas.openxmlformats.org/drawingml/2006/chart';
+    const esc=(s:string)=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const chart=(title:string,col:string,values:number[])=>`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="${ns}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${esc(title)}</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:layout/><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>${esc(title)}</c:v></c:tx><c:cat><c:strRef><c:f>Progress!$A$2:$A$${dates.length+1}</c:f><c:strCache><c:ptCount val="${dates.length}"/>${dates.map((d,i)=>`<c:pt idx="${i}"><c:v>${d}</c:v></c:pt>`).join('')}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Progress!$${col}$2:$${col}$${dates.length+1}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="${values.length}"/>${values.map((v,i)=>`<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join('')}</c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:lineChart><c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:crossAx val="2"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:crossAx val="1"/><c:crosses val="autoZero"/></c:valAx></c:plotArea><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
+    zip.file('xl/charts/chart1.xml',chart('Habit completion','D',dates.map(d=>completion(state,d).rate/100)));
+    zip.file('xl/charts/chart2.xml',chart('Training minutes','E',dates.map(d=>state.logs[d].training)));
+    const anchor=(id:number,row:number)=>`<xdr:twoCellAnchor><xdr:from><xdr:col>7</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>18</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${row+15}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${id}" name="Progress chart ${id}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="${ns}"><c:chart xmlns:c="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId${id}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`;
+    zip.file('xl/drawings/drawing1.xml',`<?xml version="1.0" encoding="UTF-8"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">${anchor(1,1)}${anchor(2,18)}</xdr:wsDr>`);
+    const relationships='http://schemas.openxmlformats.org/package/2006/relationships';
+    zip.file('xl/drawings/_rels/drawing1.xml.rels',`<Relationships xmlns="${relationships}">${[1,2].map(i=>`<Relationship Id="rId${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart${i}.xml"/>`).join('')}</Relationships>`);
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels',`<Relationships xmlns="${relationships}"><Relationship Id="rIdArc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>`);
+    const sheet=await zip.file('xl/worksheets/sheet1.xml')?.async('string'); if(sheet)zip.file('xl/worksheets/sheet1.xml',sheet.replace('</worksheet>','<drawing r:id="rIdArc"/></worksheet>'));
+    const types=await zip.file('[Content_Types].xml')?.async('string'); if(types)zip.file('[Content_Types].xml',types.replace('</Types>','<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>'));
+  }
+  const blob=await zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`fvc7-arc-${new Date().toISOString().slice(0,10)}.xlsx`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
